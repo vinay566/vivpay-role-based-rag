@@ -1,0 +1,14 @@
+VivPay Fraud Investigation Policy
+
+Fraud alerts are generated when transactions
+match defined risk indicators.
+
+Low risk alerts require routine review.
+Medium risk alerts require additional monitoring.
+High risk alerts should be prioritized.
+Critical risk alerts require urgent investigation.
+
+Analysts should review transaction details,
+investigate suspicious activity, and record findings.
+
+A fraud alert does not automatically prove fraud.

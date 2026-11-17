@@ -1,0 +1,12 @@
+VivPay Customer Payment Guide
+
+Customers can review their transaction history
+in the application.
+
+Transaction records contain transaction ID,
+date, amount, payment channel, and status.
+
+If a transaction appears incorrect,
+contact the official support team.
+
+Never share passwords, PINs, or OTPs.

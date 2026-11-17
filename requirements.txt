@@ -1,0 +1,16 @@
+
+langchain
+langchain-community
+langchain-groq
+langchain-huggingface
+langchain-text-splitters
+sentence-transformers
+faiss-cpu
+pypdf
+python-dotenv
+fastapi
+uvicorn
+mysql-connector-python
+python-multipart
+PyJWT
+python-multipart

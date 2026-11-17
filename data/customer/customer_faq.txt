@@ -1,0 +1,15 @@
+VivPay Customer FAQ
+
+Q: What should I do if my payment is pending?
+
+A: Check the transaction status in your application.
+If it remains pending, contact customer support.
+
+Q: What should I do if my payment fails?
+
+A: Check your transaction details.
+If the amount was debited, contact customer support.
+
+Q: What is a transaction ID?
+
+A: A transaction ID identifies a particular transaction.

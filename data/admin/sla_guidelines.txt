@@ -1,0 +1,12 @@
+VivPay SLA Guidelines
+
+SLA means Service Level Agreement.
+
+It defines the expected time for resolving
+a customer service case.
+
+An SLA breach occurs when a case exceeds
+its agreed resolution time.
+
+Operations teams should monitor open cases
+and prioritize overdue cases.
