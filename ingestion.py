@@ -9,7 +9,7 @@ from langchain_community.document_loaders import (
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 
 from langchain_community.vectorstores import FAISS
 
@@ -104,13 +104,13 @@ def split_documents(documents):
 
 def create_embeddings():
 
-    print("\nLoading HuggingFace embedding model...")
+    print("\nLoading FastEmbed model...")
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
+    embeddings = FastEmbedEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+
+    print("FastEmbed model loaded successfully!")
 
     return embeddings
 

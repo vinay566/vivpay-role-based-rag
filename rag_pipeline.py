@@ -9,14 +9,13 @@ from langchain_community.vectorstores import FAISS
 
 
 # ==========================================
-# 1. LOAD ENVIRONMENT VARIABLES
+# 1. ENVIRONMENT CONFIGURATION
 # ==========================================
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Read Streamlit Cloud secrets if environment variable is unavailable
 if not GROQ_API_KEY:
     try:
         import streamlit as st
@@ -33,14 +32,13 @@ if not GROQ_API_KEY:
 # ==========================================
 
 BASE_DIR = Path(__file__).resolve().parent
-
 VECTOR_FOLDER = BASE_DIR / "vectorstore"
 
 ALLOWED_ROLES = ["admin", "customer"]
 
 
 # ==========================================
-# 3. INITIALIZE EMBEDDINGS
+# 3. EMBEDDINGS
 # ==========================================
 
 embeddings = FastEmbedEmbeddings(
@@ -49,7 +47,7 @@ embeddings = FastEmbedEmbeddings(
 
 
 # ==========================================
-# 4. INITIALIZE GROQ LLM
+# 4. GROQ LLM
 # ==========================================
 
 llm = ChatGroq(
@@ -75,17 +73,15 @@ def load_vectorstore(role):
             f"Vector database not found: {db_path}"
         )
 
-    vectorstore = FAISS.load_local(
+    return FAISS.load_local(
         str(db_path),
         embeddings,
         allow_dangerous_deserialization=True
     )
 
-    return vectorstore
-
 
 # ==========================================
-# 6. RETRIEVE RELEVANT DOCUMENTS
+# 6. RETRIEVE DOCUMENTS
 # ==========================================
 
 def retrieve_documents(role, question):
@@ -93,59 +89,104 @@ def retrieve_documents(role, question):
     vectorstore = load_vectorstore(role)
 
     retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 2}
+        search_kwargs={"k": 3}
     )
 
-    documents = retriever.invoke(question)
-
-    return documents
+    return retriever.invoke(question)
 
 
 # ==========================================
-# 7. GENERATE ANSWER USING GROQ
+# 7. FORMAT CHAT HISTORY
 # ==========================================
 
-def get_answer(role, question):
+def format_chat_history(chat_history):
+
+    recent_history = chat_history[-10:]
+
+    conversation = []
+
+    for message in recent_history:
+
+        role = message.get("role", "")
+        content = message.get("content", "")
+
+        if role in ["user", "assistant"] and content:
+            conversation.append(
+                f"{role.upper()}: {content}"
+            )
+
+    return "\n".join(conversation)
+
+
+# ==========================================
+# 8. GENERATE CONVERSATIONAL ANSWER
+# ==========================================
+
+def get_answer(role, question, chat_history=None):
 
     if role not in ALLOWED_ROLES:
         raise ValueError("Invalid user role")
 
-    if not question.strip():
+    if not question or not question.strip():
         raise ValueError("Question cannot be empty")
 
-    documents = retrieve_documents(role, question)
+    chat_history = chat_history or []
 
-    if not documents:
-        return {
-            "answer": "I could not find relevant information in the knowledge base.",
-            "sources": []
-        }
+    conversation = format_chat_history(chat_history)
+
+    # Include history to improve retrieval for follow-up questions.
+    retrieval_query = (
+        f"{conversation}\nCURRENT QUESTION: {question}"
+        if conversation else question
+    )
+
+    documents = retrieve_documents(
+        role,
+        retrieval_query
+    )
 
     context = "\n\n".join(
-        doc.page_content for doc in documents
+        document.page_content
+        for document in documents
     )
+
+    if not context:
+        context = "No relevant knowledge-base documents found."
 
     prompt = f"""
 You are VivPay's AI financial assistance assistant.
 
-User role: {role}
+USER ROLE:
+{role}
 
-Answer the question using ONLY the provided context.
+PREVIOUS CONVERSATION:
+{conversation if conversation else "No previous conversation."}
 
-Rules:
-1. Do not invent financial policies or information.
-2. If the answer is not in the context, clearly say
-   that the available knowledge base does not contain
-   enough information.
-3. Give clear and simple answers.
-4. Do not reveal information from another role's
-   knowledge base.
+CURRENT QUESTION:
+{question}
 
-CONTEXT:
+KNOWLEDGE BASE CONTEXT:
 {context}
 
-QUESTION:
-{question}
+INSTRUCTIONS:
+
+1. Understand the current question using the previous conversation.
+2. If asked "What was my last question?", repeat the most recent
+   USER question from the previous conversation, not the current one.
+3. If asked "What was your previous answer?", summarize the previous
+   ASSISTANT response.
+4. Understand follow-up questions such as:
+   - Tell me more.
+   - Explain that.
+   - What about it?
+   - Give more details.
+5. Use the knowledge base for policies, procedures and operational facts.
+6. Never invent policies, transaction details or financial information.
+7. If the knowledge base does not contain enough information for a
+   factual policy question, clearly say so.
+8. Do not reveal information from another role's knowledge base.
+9. Do not claim to remember messages that are not included above.
+10. Answer in clear, simple language.
 
 ANSWER:
 """
@@ -153,8 +194,8 @@ ANSWER:
     response = llm.invoke(prompt)
 
     sources = list(set(
-        doc.metadata.get("source", "Unknown")
-        for doc in documents
+        document.metadata.get("source", "Unknown")
+        for document in documents
     ))
 
     return {
@@ -164,33 +205,45 @@ ANSWER:
 
 
 # ==========================================
-# 8. TEST THE RAG PIPELINE
+# 9. TEST
 # ==========================================
 
 if __name__ == "__main__":
 
-    print("\n===== VIVPAY ROLE-BASED RAG =====")
+    print("\n===== VIVPAY CONVERSATIONAL RAG =====")
 
     role = input(
         "Enter role (admin/customer): "
     ).strip().lower()
 
-    question = input(
-        "Enter your question: "
-    ).strip()
+    history = []
 
-    try:
+    while True:
 
-        result = get_answer(role, question)
+        question = input("\nYou: ").strip()
 
-        print("\n===== GENERATED ANSWER =====")
-        print(result["answer"])
+        if question.lower() in ["exit", "quit"]:
+            break
 
-        print("\n===== SOURCE DOCUMENTS =====")
+        try:
 
-        for source in result["sources"]:
-            print("-", source)
+            result = get_answer(
+                role=role,
+                question=question,
+                chat_history=history
+            )
 
-    except Exception as error:
+            print("\nVivPay AI:", result["answer"])
 
-        print("\nError:", error)
+            history.append({
+                "role": "user",
+                "content": question
+            })
+
+            history.append({
+                "role": "assistant",
+                "content": result["answer"]
+            })
+
+        except Exception as error:
+            print("Error:", error)

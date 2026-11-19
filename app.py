@@ -4,138 +4,47 @@ import secrets
 
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Depends
+)
+
+from fastapi.security import (
+    HTTPBearer,
+    HTTPAuthorizationCredentials
+)
 
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from rag_pipeline import get_answer
 
 
-
 # ==========================================
-# 1. AUTHENTICATION CONFIGURATION
+# 1. ENVIRONMENT CONFIGURATION
 # ==========================================
 
 load_dotenv()
 
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
-CUSTOMER_API_TOKEN = os.getenv("CUSTOMER_API_TOKEN")
 
 security = HTTPBearer()
 
 
 # ==========================================
-# 2. AUTHENTICATION FUNCTIONS
+# 2. REQUEST MODELS
 # ==========================================
 
-def authenticate_user(credentials, expected_token, role):
+class ChatMessage(BaseModel):
 
-    if not expected_token:
-        raise HTTPException(
-            status_code=500,
-            detail=f"{role} token is not configured."
-        )
+    role: Literal["user", "assistant"]
 
-    if not secrets.compare_digest(
-        credentials.credentials,
-        expected_token
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication token."
-        )
-
-    return role
-
-
-def verify_admin(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-
-    return authenticate_user(
-        credentials,
-        ADMIN_API_TOKEN,
-        "Admin"
+    content: str = Field(
+        min_length=1,
+        max_length=4000
     )
 
-
-def verify_customer(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-
-    return authenticate_user(
-        credentials,
-        CUSTOMER_API_TOKEN,
-        "Customer"
-    )
-
-
-# ==========================================
-# ROLE-BASED AUTHENTICATION
-# ==========================================
-
-def authenticate_user(
-    credentials: HTTPAuthorizationCredentials,
-    expected_token: str,
-    role: str
-):
-
-    if not expected_token:
-        raise HTTPException(
-            status_code=500,
-            detail=f"{role} API token is not configured."
-        )
-
-    if not secrets.compare_digest(
-        credentials.credentials,
-        expected_token
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication token."
-        )
-
-    return role
-
-
-def verify_admin(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-
-    return authenticate_user(
-        credentials,
-        ADMIN_API_TOKEN,
-        "Admin"
-    )
-
-
-def verify_customer(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-
-    return authenticate_user(
-        credentials,
-        CUSTOMER_API_TOKEN,
-        "Customer"
-    )
-
-
-
-# ==========================================
-# 1. INITIALIZE FASTAPI
-# ==========================================
-
-app = FastAPI(
-    title="VivPay Role-Based RAG API",
-    description="AI Financial Operations and Customer Service Platform",
-    version="1.0.0"
-)
-
-
-# ==========================================
-# 2. REQUEST MODEL
-# ==========================================
 
 class ChatRequest(BaseModel):
 
@@ -144,9 +53,51 @@ class ChatRequest(BaseModel):
         max_length=2000
     )
 
+    chat_history: list[ChatMessage] = Field(
+        default_factory=list,
+        max_length=20
+    )
+
 
 # ==========================================
-# 3. HEALTH CHECK
+# 3. AUTHENTICATION
+# ==========================================
+
+def verify_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+
+    if not ADMIN_API_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="Admin API token is not configured."
+        )
+
+    if not secrets.compare_digest(
+        credentials.credentials,
+        ADMIN_API_TOKEN
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token."
+        )
+
+    return "admin"
+
+
+# ==========================================
+# 4. INITIALIZE FASTAPI
+# ==========================================
+
+app = FastAPI(
+    title="VivPay Role-Based RAG API",
+    description="AI Financial Operations and Customer Service Platform",
+    version="2.0.0"
+)
+
+
+# ==========================================
+# 5. HEALTH CHECK
 # ==========================================
 
 @app.get("/")
@@ -172,33 +123,34 @@ def statement_status():
 
     return {
         "feature": "Bank Statement RAG",
-        "status": "preparing",
-        "supported_formats": [
-            "PDF",
-            "CSV",
-            "XLSX"
-        ],
-        "storage": "In-memory processing",
-        "authentication": "Required before upload is enabled"
+        "status": "ready",
+        "supported_formats": ["PDF", "CSV", "XLSX"],
+        "storage": "In-memory processing"
     }
 
 
 # ==========================================
-# 4. COMMON CHAT FUNCTION
+# 6. COMMON CHAT FUNCTION
 # ==========================================
 
-def process_question(role, question):
+def process_question(role, request):
 
     try:
 
+        history = [
+            message.model_dump()
+            for message in request.chat_history
+        ]
+
         result = get_answer(
             role=role,
-            question=question
+            question=request.question,
+            chat_history=history
         )
 
         return {
             "role": role,
-            "question": question,
+            "question": request.question,
             "answer": result["answer"],
             "sources": result["sources"]
         }
@@ -220,9 +172,8 @@ def process_question(role, question):
         )
 
 
-
 # ==========================================
-# ADMIN CHAT ENDPOINT
+# 7. ADMIN CHAT
 # ==========================================
 
 @app.post("/admin/chat")
@@ -233,14 +184,12 @@ def admin_chat(
 
     return process_question(
         role="admin",
-        question=request.question
+        request=request
     )
 
 
-
-
 # ==========================================
-# CUSTOMER CHAT ENDPOINT
+# 8. CUSTOMER CHAT
 # ==========================================
 
 @app.post("/customer/chat")
@@ -248,12 +197,12 @@ def customer_chat(request: ChatRequest):
 
     return process_question(
         role="customer",
-        question=request.question
+        request=request
     )
 
 
 # ==========================================
-# 7. RUN INFORMATION
+# 9. API INFORMATION
 # ==========================================
 
 @app.get("/api-info")
@@ -265,8 +214,14 @@ def api_info():
         "llm": "Groq",
         "vector_database": "FAISS",
         "embedding_model": "all-MiniLM-L6-v2",
+        "features": [
+            "Admin RAG",
+            "Customer RAG",
+            "Conversation History"
+        ],
         "endpoints": [
             "/admin/chat",
-            "/customer/chat"
+            "/customer/chat",
+            "/health"
         ]
     }
