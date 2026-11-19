@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_community.vectorstores import FAISS
 
 
@@ -16,8 +16,16 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# Read Streamlit Cloud secrets if environment variable is unavailable
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found in .env")
+    try:
+        import streamlit as st
+        GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
+    except Exception:
+        pass
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not configured")
 
 
 # ==========================================
@@ -35,10 +43,8 @@ ALLOWED_ROLES = ["admin", "customer"]
 # 3. INITIALIZE EMBEDDINGS
 # ==========================================
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True}
+embeddings = FastEmbedEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 
