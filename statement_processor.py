@@ -30,17 +30,42 @@ def extract_pdf(file_bytes):
     return "\n\n".join(pages)
 
 
-def extract_csv(file_bytes):
-    """Extract transaction data from a CSV statement."""
 
-    dataframe = pd.read_csv(
-        io.BytesIO(file_bytes),
-        dtype=str
-    )
+def extract_csv(file_bytes):
+
+    encodings = [
+        "utf-8-sig",
+        "cp1252",
+        "latin1"
+    ]
+
+    dataframe = None
+
+    for encoding in encodings:
+
+        try:
+            dataframe = pd.read_csv(
+                io.BytesIO(file_bytes),
+                dtype=str,
+                encoding=encoding
+            )
+
+            print(f"CSV successfully decoded using {encoding}")
+            break
+
+        except UnicodeDecodeError:
+            continue
+
+    if dataframe is None:
+        raise ValueError(
+            "Unable to decode the CSV file. "
+            "Please check its encoding."
+        )
 
     dataframe = dataframe.fillna("")
 
     return dataframe.to_string(index=False)
+
 
 
 def extract_excel(file_bytes):
