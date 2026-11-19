@@ -16,3 +16,11 @@ PyJWT
 python-multipart
 streamlit
 requests
+fastembed
+langchain-community
+langchain-core
+langchain-text-splitters
+langchain-groq
+faiss-cpu
+python-dotenv
+fastembed
