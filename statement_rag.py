@@ -1,128 +1,115 @@
 
-from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
 
 from rag_pipeline import embeddings, llm
 
-
-# ==========================================
-# 1. FORMAT CONVERSATION HISTORY
-# ==========================================
-
-def format_history(chat_history):
-
-    conversation = []
-
-    for message in chat_history[-10:]:
-
-        role = message.get("role", "")
-        content = message.get("content", "")
-
-        if role in ["user", "assistant"] and content:
-            conversation.append(
-                f"{role.upper()}: {content}"
-            )
-
-    return "\n".join(conversation)
-
-
-# ==========================================
-# 2. GENERATE STATEMENT ANSWER
-# ==========================================
 
 def get_statement_answer(
     question,
     statement_text,
     chat_history=None
 ):
+    if chat_history is None:
+        chat_history = []
 
-    if not question or not question.strip():
-        raise ValueError("Question cannot be empty.")
+    # Normalize previous conversation messages
+    normalized_history = []
 
-    if not statement_text or not statement_text.strip():
-        raise ValueError("No bank statement data provided.")
+    for message in chat_history:
+        role = message.get("role") or message.get("message_role")
+        content = message.get("content", "")
 
-    chat_history = chat_history or []
+        if role in ["user", "assistant"] and content:
+            normalized_history.append({
+                "role": role,
+                "content": content
+            })
 
-    conversation = format_history(chat_history)
+    # Handle "What was my last question?" directly
+    if question.strip().lower().rstrip("?.! ") in [
+        "what is my last question",
+        "what was my last question",
+        "what is my previous question",
+        "what was my previous question"
+    ]:
+        previous_questions = [
+            message["content"]
+            for message in normalized_history
+            if message["role"] == "user"
+        ]
 
-    # Split statement into smaller documents
+        if previous_questions:
+            return (
+                f'Your previous question was: '
+                f'"{previous_questions[-1]}"'
+            )
+
+        return "There is no previous question from you in this conversation."
+
+    # Build conversation context
+    history_text = ""
+
+    for message in normalized_history[-10:]:
+        history_text += (
+            f'{message["role"].upper()}: '
+            f'{message["content"]}\n'
+        )
+
+    # Create statement vectorstore
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=120
     )
 
-    documents = splitter.create_documents(
-        [statement_text]
-    )
+    documents = splitter.create_documents([statement_text])
 
-    if not documents:
-        raise ValueError("Unable to read statement content.")
-
-    # Build temporary vector database
     vectorstore = FAISS.from_documents(
         documents,
         embeddings
     )
 
-    # Retrieve relevant statement information
+    # Include conversation context in retrieval
     retrieval_query = (
-        f"{conversation}\nCURRENT QUESTION: {question}"
-        if conversation else question
+        history_text
+        + "\nCurrent question: "
+        + question
     )
 
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 3}
-    )
-
-    relevant_documents = retriever.invoke(
-        retrieval_query
+    relevant_docs = vectorstore.similarity_search(
+        retrieval_query,
+        k=3
     )
 
     context = "\n\n".join(
-        document.page_content
-        for document in relevant_documents
+        doc.page_content for doc in relevant_docs
     )
 
     prompt = f"""
-You are VivPay's Bank Statement AI Assistant.
+You are VivPay Bank Statement AI.
 
-Your job is to answer questions using the uploaded bank
-statement and the previous conversation.
+Answer using the uploaded bank statement and conversation history.
+
+RULES:
+1. Understand follow-up questions using previous messages.
+2. Resolve words such as "it", "that transaction", and "this".
+3. Remember previous answers and questions.
+4. Never invent transaction details.
+5. If information is unavailable, say so.
 
 PREVIOUS CONVERSATION:
-{conversation if conversation else "No previous conversation."}
+{history_text}
+
+BANK STATEMENT DATA:
+{context}
 
 CURRENT QUESTION:
 {question}
-
-UPLOADED BANK STATEMENT CONTEXT:
-{context}
-
-IMPORTANT RULES:
-
-1. Use the uploaded statement as the source of transaction facts.
-2. Never invent transactions, dates, amounts or merchant names.
-3. If asked "What was my last question?", repeat the latest
-   USER question from the previous conversation.
-4. If asked "What was my last transaction?", identify the
-   most recent transaction in the uploaded statement using
-   its transaction date, not the order of retrieved text chunks.
-5. If asked a follow-up such as "Tell me more about it",
-   use the previous conversation to understand the reference.
-6. If the required transaction is not present in the context,
-   say that you cannot identify it from the available statement data.
-7. Distinguish between transaction date and statement date.
-8. Do not expose information from another conversation or statement.
-9. Give clear and simple answers.
 
 ANSWER:
 """
 
     response = llm.invoke(prompt)
 
-    return {
-        "answer": response.content,
-        "sources": ["Uploaded Bank Statement"]
-    }
+    return response.content

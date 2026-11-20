@@ -3,8 +3,9 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 from langchain_groq import ChatGroq
-from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_community.vectorstores import FAISS
 
 
@@ -12,33 +13,18 @@ from langchain_community.vectorstores import FAISS
 # 1. ENVIRONMENT CONFIGURATION
 # ==========================================
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+
+load_dotenv(BASE_DIR / ".env")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
-    try:
-        import streamlit as st
-        GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
-    except Exception:
-        pass
-
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not configured")
+    raise ValueError("GROQ_API_KEY is missing.")
 
 
 # ==========================================
-# 2. PROJECT CONFIGURATION
-# ==========================================
-
-BASE_DIR = Path(__file__).resolve().parent
-VECTOR_FOLDER = BASE_DIR / "vectorstore"
-
-ALLOWED_ROLES = ["admin", "customer"]
-
-
-# ==========================================
-# 3. EMBEDDINGS
+# 2. FASTEMBED INITIALIZATION
 # ==========================================
 
 embeddings = FastEmbedEmbeddings(
@@ -47,102 +33,121 @@ embeddings = FastEmbedEmbeddings(
 
 
 # ==========================================
-# 4. GROQ LLM
+# 3. GROQ LLM INITIALIZATION
 # ==========================================
 
 llm = ChatGroq(
     model="openai/gpt-oss-20b",
     temperature=0,
-    api_key=GROQ_API_KEY
+    groq_api_key=GROQ_API_KEY
 )
 
 
 # ==========================================
-# 5. LOAD ROLE-BASED VECTOR DATABASE
+# 4. LOAD ROLE-BASED FAISS VECTORSTORES
 # ==========================================
 
-def load_vectorstore(role):
+VECTORSTORE_DIR = BASE_DIR / "vectorstore"
 
-    if role not in ALLOWED_ROLES:
-        raise ValueError("Invalid user role")
+vectorstores = {}
 
-    db_path = VECTOR_FOLDER / role
+for role in ["admin", "customer"]:
 
-    if not db_path.exists():
+    store_path = VECTORSTORE_DIR / role
+
+    if not store_path.exists():
         raise FileNotFoundError(
-            f"Vector database not found: {db_path}"
+            f"Vectorstore not found for {role}: {store_path}"
         )
 
-    return FAISS.load_local(
-        str(db_path),
+    vectorstores[role] = FAISS.load_local(
+        str(store_path),
         embeddings,
         allow_dangerous_deserialization=True
     )
 
 
 # ==========================================
-# 6. RETRIEVE DOCUMENTS
-# ==========================================
-
-def retrieve_documents(role, question):
-
-    vectorstore = load_vectorstore(role)
-
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 3}
-    )
-
-    return retriever.invoke(question)
-
-
-# ==========================================
-# 7. FORMAT CHAT HISTORY
-# ==========================================
-
-def format_chat_history(chat_history):
-
-    recent_history = chat_history[-10:]
-
-    conversation = []
-
-    for message in recent_history:
-
-        role = message.get("role", "")
-        content = message.get("content", "")
-
-        if role in ["user", "assistant"] and content:
-            conversation.append(
-                f"{role.upper()}: {content}"
-            )
-
-    return "\n".join(conversation)
-
-
-# ==========================================
-# 8. GENERATE CONVERSATIONAL ANSWER
+# 5. CONVERSATIONAL RAG FUNCTION
 # ==========================================
 
 def get_answer(role, question, chat_history=None):
 
-    if role not in ALLOWED_ROLES:
-        raise ValueError("Invalid user role")
+    if chat_history is None:
+        chat_history = []
 
-    if not question or not question.strip():
-        raise ValueError("Question cannot be empty")
+    if role not in vectorstores:
+        raise ValueError(f"Invalid role: {role}")
 
-    chat_history = chat_history or []
+    # Normalize conversation messages
+    normalized_history = []
 
-    conversation = format_chat_history(chat_history)
+    for message in chat_history[-10:]:
 
-    # Include history to improve retrieval for follow-up questions.
+        speaker = message.get("role") or message.get("message_role")
+        content = message.get("content", "")
+
+        if speaker in ["user", "assistant"] and content:
+            normalized_history.append({
+                "role": speaker,
+                "content": content
+            })
+
+    # ======================================
+    # PREVIOUS QUESTION MEMORY
+    # ======================================
+
+    normalized_question = question.strip().lower().rstrip("?.! ")
+
+    if normalized_question in [
+        "what is my last question",
+        "what was my last question",
+        "what is my previous question",
+        "what was my previous question"
+    ]:
+
+        previous_questions = [
+            message["content"]
+            for message in normalized_history
+            if message["role"] == "user"
+        ]
+
+        if previous_questions:
+            return (
+                f'Your previous question was: '
+                f'"{previous_questions[-1]}"'
+            )
+
+        return "There is no previous question from you in this conversation."
+
+    # ======================================
+    # BUILD CONVERSATION CONTEXT
+    # ======================================
+
+    history_text = ""
+
+    for message in normalized_history:
+
+        history_text += (
+            f'{message["role"].upper()}: '
+            f'{message["content"]}\n'
+        )
+
+    # ======================================
+    # RETRIEVE RELEVANT DOCUMENTS
+    # ======================================
+
     retrieval_query = (
-        f"{conversation}\nCURRENT QUESTION: {question}"
-        if conversation else question
+        history_text
+        + "\nCurrent question: "
+        + question
     )
 
-    documents = retrieve_documents(
-        role,
-        retrieval_query
+    vectorstore = vectorstores[role]
+
+    documents = vectorstore.similarity_search(
+        retrieval_query,
+        k=2
     )
 
     context = "\n\n".join(
@@ -150,100 +155,45 @@ def get_answer(role, question, chat_history=None):
         for document in documents
     )
 
-    if not context:
-        context = "No relevant knowledge-base documents found."
+    # ======================================
+    # GROQ PROMPT
+    # ======================================
 
     prompt = f"""
-You are VivPay's AI financial assistance assistant.
+You are VivPay's AI financial operations assistant.
 
-USER ROLE:
-{role}
+Your role is: {role}
 
-PREVIOUS CONVERSATION:
-{conversation if conversation else "No previous conversation."}
+Answer using the provided knowledge base.
 
-CURRENT QUESTION:
-{question}
+CONVERSATION RULES:
 
-KNOWLEDGE BASE CONTEXT:
+1. Understand the current question using previous messages.
+2. Resolve follow-up questions such as:
+   "Tell me more about it."
+   "Explain that again."
+   "What about the previous one?"
+3. Remember previous questions and answers.
+4. Never invent information.
+5. If the knowledge base does not contain the answer,
+   clearly explain that the information is unavailable.
+6. Keep answers clear and relevant.
+
+KNOWLEDGE BASE:
+
 {context}
 
-INSTRUCTIONS:
+PREVIOUS CONVERSATION:
 
-1. Understand the current question using the previous conversation.
-2. If asked "What was my last question?", repeat the most recent
-   USER question from the previous conversation, not the current one.
-3. If asked "What was your previous answer?", summarize the previous
-   ASSISTANT response.
-4. Understand follow-up questions such as:
-   - Tell me more.
-   - Explain that.
-   - What about it?
-   - Give more details.
-5. Use the knowledge base for policies, procedures and operational facts.
-6. Never invent policies, transaction details or financial information.
-7. If the knowledge base does not contain enough information for a
-   factual policy question, clearly say so.
-8. Do not reveal information from another role's knowledge base.
-9. Do not claim to remember messages that are not included above.
-10. Answer in clear, simple language.
+{history_text}
+
+CURRENT USER QUESTION:
+
+{question}
 
 ANSWER:
 """
 
     response = llm.invoke(prompt)
 
-    sources = list(set(
-        document.metadata.get("source", "Unknown")
-        for document in documents
-    ))
-
-    return {
-        "answer": response.content,
-        "sources": sources
-    }
-
-
-# ==========================================
-# 9. TEST
-# ==========================================
-
-if __name__ == "__main__":
-
-    print("\n===== VIVPAY CONVERSATIONAL RAG =====")
-
-    role = input(
-        "Enter role (admin/customer): "
-    ).strip().lower()
-
-    history = []
-
-    while True:
-
-        question = input("\nYou: ").strip()
-
-        if question.lower() in ["exit", "quit"]:
-            break
-
-        try:
-
-            result = get_answer(
-                role=role,
-                question=question,
-                chat_history=history
-            )
-
-            print("\nVivPay AI:", result["answer"])
-
-            history.append({
-                "role": "user",
-                "content": question
-            })
-
-            history.append({
-                "role": "assistant",
-                "content": result["answer"]
-            })
-
-        except Exception as error:
-            print("Error:", error)
+    return response.content

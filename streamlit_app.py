@@ -1,625 +1,467 @@
-
+import inspect
 import os
-import uuid
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 
 from statement_processor import process_statement
 from statement_rag import get_statement_answer
-
+from supabase_client import (
+    create_conversation,
+    save_message,
+    get_conversations,
+    get_messages,
+    delete_conversation,
+)
 
 # ==========================================
-# 1. PAGE CONFIGURATION
+# 1. CONFIGURATION
 # ==========================================
+
+load_dotenv()
 
 st.set_page_config(
-    page_title="VivPay | AI Financial Assistant",
+    page_title="VivPay AI Platform",
     page_icon="💳",
-    layout="wide"
+    layout="wide",
 )
 
-API_BASE_URL = os.getenv(
-    "API_BASE_URL",
-    "http://127.0.0.1:8000"
-)
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
+# Demo identity: replace with authenticated user IDs
+# before making the application public.
+OWNER_IDS = {
+    "admin": "admin-demo",
+    "customer": "customer-demo",
+    "statement": "customer-demo",
+}
 
+SECTIONS = {
+    "Admin Portal": "admin",
+    "Customer FAQ": "customer",
+    "Bank Statement AI": "statement",
+}
+
+# Streamlit section name -> Supabase database value
+DB_TYPES = {
+    "admin": "admin",
+    "customer": "customer",
+    "statement": "bank_statement",
+}
 
 # ==========================================
 # 2. SESSION STATE
 # ==========================================
 
-SECTIONS = ["admin", "customer", "statement"]
+if "active_section" not in st.session_state:
+    st.session_state.active_section = "customer"
 
-
-def create_conversation():
-
-    return {
-        "id": str(uuid.uuid4()),
-        "title": "New Chat",
-        "messages": [],
-        "statement_text": None,
-        "statement_name": None
+if "active_conversations" not in st.session_state:
+    st.session_state.active_conversations = {
+        "admin": None,
+        "customer": None,
+        "statement": None,
     }
 
+if "messages_cache" not in st.session_state:
+    st.session_state.messages_cache = {}
 
-for section in SECTIONS:
+if "statement_texts" not in st.session_state:
+    st.session_state.statement_texts = {}
 
-    history_key = f"{section}_history"
-    active_key = f"active_{section}_id"
-
-    if history_key not in st.session_state:
-        st.session_state[history_key] = []
-
-    if not st.session_state[history_key]:
-
-        conversation = create_conversation()
-
-        st.session_state[history_key].append(
-            conversation
-        )
-
-        st.session_state[active_key] = conversation["id"]
-
-    elif active_key not in st.session_state:
-
-        st.session_state[active_key] = (
-            st.session_state[history_key][0]["id"]
-        )
-
+if "statement_names" not in st.session_state:
+    st.session_state.statement_names = {}
 
 # ==========================================
-# 3. CONVERSATION FUNCTIONS
+# 3. SUPABASE HELPERS
 # ==========================================
 
-def get_active_conversation(section):
 
-    conversations = st.session_state[
-        f"{section}_history"
-    ]
-
-    active_id = st.session_state[
-        f"active_{section}_id"
-    ]
-
-    for conversation in conversations:
-
-        if conversation["id"] == active_id:
-            return conversation
-
-    conversation = create_conversation()
-
-    conversations.insert(0, conversation)
-
-    st.session_state[
-        f"active_{section}_id"
-    ] = conversation["id"]
-
-    return conversation
-
-
-def create_new_chat(section):
-
-    conversation = create_conversation()
-
-    st.session_state[
-        f"{section}_history"
-    ].insert(0, conversation)
-
-    st.session_state[
-        f"active_{section}_id"
-    ] = conversation["id"]
-
-
-def render_history_controls(section):
-
-    conversations = st.session_state[
-        f"{section}_history"
-    ]
-
-    st.sidebar.subheader("💬 Chat History")
-
-    col1, col2 = st.sidebar.columns(2)
-
-    with col1:
-
-        if st.button(
-            "＋ New Chat",
-            key=f"new_{section}",
-            use_container_width=True
-        ):
-
-            create_new_chat(section)
-            st.rerun()
-
-    with col2:
-
-        if st.button(
-            "🗑 Clear History",
-            key=f"clear_{section}",
-            use_container_width=True
-        ):
-
-            st.session_state[
-                f"{section}_history"
-            ] = []
-
-            create_new_chat(section)
-            st.rerun()
-
-    labels = {
-        item["id"]: item["title"]
-        for item in conversations
-    }
-
-    active_id = st.session_state[
-        f"active_{section}_id"
-    ]
-
-    if active_id not in labels:
-        active_id = conversations[0]["id"]
-
-    selected_id = st.sidebar.selectbox(
-        "Previous Conversations",
-        options=list(labels.keys()),
-        index=list(labels.keys()).index(active_id),
-        format_func=lambda item: labels[item],
-        key=f"history_select_{section}"
+def load_section_conversations(section):
+    return get_conversations(
+        owner_id=OWNER_IDS[section],
+        conversation_type=DB_TYPES[section],
     )
 
-    st.session_state[
-        f"active_{section}_id"
-    ] = selected_id
 
-    return get_active_conversation(section)
+def load_conversation(section, conversation_id):
+    messages = get_messages(conversation_id)
+
+    st.session_state.messages_cache[conversation_id] = [
+        {
+            "role": message["message_role"],
+            "content": message["content"],
+        }
+        for message in messages
+    ]
+
+    st.session_state.active_conversations[section] = conversation_id
 
 
-def save_user_message(conversation, question):
+def start_new_chat(section):
+    st.session_state.active_conversations[section] = None
 
-    conversation["messages"].append({
-        "role": "user",
-        "content": question
+
+def remove_chat(section, conversation_id):
+    delete_conversation(conversation_id)
+
+    st.session_state.messages_cache.pop(conversation_id, None)
+    st.session_state.statement_texts.pop(conversation_id, None)
+    st.session_state.statement_names.pop(conversation_id, None)
+    st.session_state.pop(f"sources_{conversation_id}", None)
+
+    if st.session_state.active_conversations[section] == conversation_id:
+        st.session_state.active_conversations[section] = None
+
+
+def get_or_create_conversation(section, question):
+    conversation_id = st.session_state.active_conversations[section]
+
+    if conversation_id:
+        return conversation_id
+
+    title = question.strip().replace("\n", " ")[:60]
+
+    conversation = create_conversation(
+        owner_id=OWNER_IDS[section],
+        conversation_type=DB_TYPES[section],
+        title=title or "New Chat",
+    )
+
+    conversation_id = conversation["id"]
+
+    st.session_state.active_conversations[section] = conversation_id
+    st.session_state.messages_cache[conversation_id] = []
+
+    return conversation_id
+
+
+def add_message(conversation_id, role, content):
+    save_message(
+        conversation_id=conversation_id,
+        message_role=role,
+        content=content,
+    )
+
+    if conversation_id not in st.session_state.messages_cache:
+        st.session_state.messages_cache[conversation_id] = []
+
+    st.session_state.messages_cache[conversation_id].append({
+        "role": role,
+        "content": content,
     })
 
-    if conversation["title"] == "New Chat":
-        conversation["title"] = question[:35]
+
+def get_chat_history(conversation_id):
+    return st.session_state.messages_cache.get(conversation_id, [])
 
 
-def get_previous_history(conversation):
-
-    # The latest user question is already saved.
-    # Exclude it to avoid sending the current question twice.
-    return conversation["messages"][:-1]
-
-
-def display_messages(messages):
-
-    for message in messages:
-
-        with st.chat_message(message["role"]):
-
-            st.write(message["content"])
-
-            if message.get("sources"):
-
-                with st.expander("📄 View Sources"):
-
-                    for source in message["sources"]:
-                        st.write(source)
-
-
-# ==========================================
-# 4. CUSTOM CSS
-# ==========================================
-
-st.markdown("""
-<style>
-.main-title {
-    font-size: 38px;
-    font-weight: bold;
-    color: #1769AA;
-}
-
-.subtitle {
-    color: #718096;
-    font-size: 16px;
-}
-
-.stButton button {
-    border-radius: 8px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-# ==========================================
-# 5. HEADER
-# ==========================================
-
-st.markdown(
-    '<div class="main-title">💳 VivPay</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="subtitle">'
-    'AI Financial Operations & Customer Service Platform'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-st.divider()
-
-
-# ==========================================
-# 6. NAVIGATION
-# ==========================================
-
-st.sidebar.title("VivPay Navigation")
-
-role = st.sidebar.radio(
-    "Select Portal",
-    ["Customer Portal", "Admin Portal"]
-)
-
-st.sidebar.divider()
-
-
-# ==========================================
-# 7. CUSTOMER PORTAL
-# ==========================================
-
-if role == "Customer Portal":
-
-    customer_section = st.sidebar.radio(
-        "Customer Services",
-        [
-            "Customer FAQ Chat",
-            "Bank Statement AI"
-        ]
+def call_statement_rag(question, statement_text, chat_history):
+    sig = inspect.signature(get_statement_answer)
+    if "chat_history" in sig.parameters:
+        return get_statement_answer(
+            question=question,
+            statement_text=statement_text,
+            chat_history=chat_history,
+        )
+    return get_statement_answer(
+        question=question,
+        statement_text=statement_text,
     )
 
-    # --------------------------------------
-    # CUSTOMER FAQ CHAT
-    # --------------------------------------
 
-    if customer_section == "Customer FAQ Chat":
+# ==========================================
+# 4. SIDEBAR
+# ==========================================
 
-        conversation = render_history_controls(
-            "customer"
+st.sidebar.title("💳 VivPay")
+st.sidebar.caption("AI Financial Operations Platform")
+
+selected_section = st.sidebar.radio(
+    "Choose Portal",
+    list(SECTIONS.keys()),
+    index=list(SECTIONS.values()).index(st.session_state.active_section),
+)
+
+section = SECTIONS[selected_section]
+st.session_state.active_section = section
+
+st.sidebar.divider()
+st.sidebar.subheader("Chat History")
+
+if st.sidebar.button(
+    "➕ New Chat",
+    use_container_width=True,
+    key=f"new_chat_{section}",
+):
+    start_new_chat(section)
+    st.rerun()
+
+try:
+    conversations = load_section_conversations(section)
+
+    if conversations:
+        conversation_options = {
+            f"{item['title']} · {item['created_at'][:10]}": item["id"]
+            for item in conversations
+        }
+
+        active_id = st.session_state.active_conversations[section]
+        labels = list(conversation_options.keys())
+
+        selected_index = 0
+        for index, label in enumerate(labels):
+            if conversation_options[label] == active_id:
+                selected_index = index
+                break
+
+        selected_chat = st.sidebar.selectbox(
+            "Previous conversations",
+            labels,
+            index=selected_index,
+            key=f"history_{section}",
         )
 
-        st.header("👤 Customer AI Assistant")
+        selected_id = conversation_options[selected_chat]
 
-        st.write(
-            "Ask questions about payments, "
-            "transactions and customer support."
-        )
+        if selected_id != active_id:
+            load_conversation(section, selected_id)
+            st.rerun()
 
-        display_messages(
-            conversation["messages"]
-        )
+        if st.sidebar.button(
+            "🗑️ Delete Current Chat",
+            use_container_width=True,
+            key=f"delete_{section}",
+        ):
+            remove_chat(section, selected_id)
+            st.rerun()
+    else:
+        st.sidebar.info("No saved conversations yet.")
+
+except Exception as error:
+    st.sidebar.error(f"Unable to load history: {error}")
+    conversations = []
+
+# ==========================================
+# 5. MAIN HEADER
+# ==========================================
+
+st.title("💳 VivPay AI Financial Platform")
+
+if section == "admin":
+    st.subheader("Admin Portal")
+    st.caption("Internal financial policies and operational support.")
+elif section == "customer":
+    st.subheader("Customer FAQ Assistant")
+    st.caption("Ask questions about payments and financial services.")
+else:
+    st.subheader("Bank Statement AI")
+    st.caption("Upload a statement and ask questions about transactions.")
+
+# ==========================================
+# 6. DISPLAY CHAT MESSAGES
+# ==========================================
+
+
+def display_messages(conversation_id):
+    messages = get_chat_history(conversation_id)
+
+    for message in messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+
+# ==========================================
+# 7. ADMIN AND CUSTOMER CHAT
+# ==========================================
+
+
+def render_api_chat(section):
+    conversation_id = st.session_state.active_conversations[section]
+
+    if conversation_id:
+        display_messages(conversation_id)
+
+    question = st.chat_input(
+        "Ask your question...",
+        key=f"chat_input_{section}_{conversation_id or 'new'}",
+    )
+
+    if not question:
+        return
+
+    try:
+        conversation_id = get_or_create_conversation(section, question)
+        previous_messages = get_chat_history(conversation_id)
+
+        add_message(conversation_id, "user", question)
+
+        headers = {"Content-Type": "application/json"}
+
+        if section == "admin":
+            if not ADMIN_API_TOKEN:
+                st.error("ADMIN_API_TOKEN is not configured.")
+                return
+            headers["Authorization"] = f"Bearer {ADMIN_API_TOKEN}"
+
+        payload = {
+            "question": question,
+            "chat_history": previous_messages[-10:],
+        }
+
+        endpoint = f"{API_BASE_URL}/{section}/chat"
+
+        with st.spinner("VivPay AI is thinking..."):
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=120,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+        answer = result.get("answer", "No answer was returned.")
+        add_message(conversation_id, "assistant", answer)
+        st.rerun()
+
+    except requests.exceptions.RequestException as error:
+        st.error(f"API connection error: {error}")
+    except Exception as error:
+        st.error(f"Error: {error}")
+
+
+# ==========================================
+# 8. BANK STATEMENT AI
+# ==========================================
+
+
+def render_statement_chat():
+    conversation_id = st.session_state.active_conversations["statement"]
+
+    if conversation_id:
+        display_messages(conversation_id)
+
+    st.divider()
+    st.markdown("### Upload Bank Statement")
+
+    uploaded_file = st.file_uploader(
+        "Choose PDF, CSV, or XLSX",
+        type=["pdf", "csv", "xlsx"],
+        key=f"statement_upload_{conversation_id or 'new'}",
+    )
+
+    if uploaded_file:
+        if uploaded_file.size > 10 * 1024 * 1024:
+            st.error("File size must be less than 10 MB.")
+            return
+
+        if st.button(
+            "Process Statement",
+            key=f"process_statement_{conversation_id or 'new'}",
+        ):
+            try:
+                with st.spinner("Processing your statement..."):
+                    file_bytes = uploaded_file.getvalue()
+                    statement_text = process_statement(
+                        filename=uploaded_file.name,
+                        file_bytes=file_bytes,
+                    )
+
+                if not statement_text:
+                    st.warning("No readable text was found.")
+                    return
+
+                if not conversation_id:
+                    conversation_id = get_or_create_conversation(
+                        "statement",
+                        f"Statement: {uploaded_file.name}",
+                    )
+
+                st.session_state.statement_texts[conversation_id] = statement_text
+                st.session_state.statement_names[conversation_id] = uploaded_file.name
+
+                st.success("Statement processed successfully!")
+                st.rerun()
+
+            except Exception as error:
+                st.error(f"Statement processing failed: {error}")
+
+    conversation_id = st.session_state.active_conversations["statement"]
+
+    if conversation_id:
+        statement_text = st.session_state.statement_texts.get(conversation_id)
+        statement_name = st.session_state.statement_names.get(conversation_id)
+
+        if statement_text:
+            st.success(f"Loaded statement: {statement_name}")
+
+            with st.expander("Preview extracted statement"):
+                st.text(statement_text[:5000])
+        else:
+            st.info(
+                "Upload and process the statement again to continue "
+                "asking questions in this conversation."
+            )
 
         question = st.chat_input(
-            "Ask a customer support question...",
-            key=f"customer_input_{conversation['id']}"
+            "Ask a question about your statement...",
+            key=f"statement_input_{conversation_id}",
         )
 
         if question:
-
-            save_user_message(
-                conversation,
-                question
-            )
-
-            previous_history = get_previous_history(
-                conversation
-            )
+            if not statement_text:
+                st.warning("Please upload and process a statement first.")
+                return
 
             try:
+                # 1. Retrieve previous messages BEFORE adding current question
+                previous_messages = get_chat_history(conversation_id)
 
-                with st.spinner(
-                    "VivPay AI is thinking..."
-                ):
+                # 2. Save current user question
+                add_message(conversation_id, "user", question)
 
-                    response = requests.post(
-                        f"{API_BASE_URL}/customer/chat",
-                        json={
-                            "question": question,
-                            "chat_history": previous_history
-                        },
-                        timeout=90
+                # 3. Query Statement RAG
+                with st.spinner("Analyzing your statement..."):
+                    result = call_statement_rag(
+                        question=question,
+                        statement_text=statement_text,
+                        chat_history=previous_messages[-10:],
                     )
 
-                    response.raise_for_status()
-
-                    result = response.json()
-
-                conversation["messages"].append({
-                    "role": "assistant",
-                    "content": result.get(
-                        "answer",
-                        "No answer returned."
-                    ),
-                    "sources": result.get("sources", [])
-                })
-
-            except requests.exceptions.RequestException as error:
-
-                conversation["messages"].append({
-                    "role": "assistant",
-                    "content": f"Customer chatbot error: {error}"
-                })
-
-            st.rerun()
-
-
-    # --------------------------------------
-    # BANK STATEMENT AI
-    # --------------------------------------
-
-    elif customer_section == "Bank Statement AI":
-
-        conversation = render_history_controls(
-            "statement"
-        )
-
-        st.header("📄 Bank Statement AI Assistant")
-
-        st.write(
-            "Upload a statement and ask questions "
-            "about your transactions."
-        )
-
-        st.warning(
-            "Demonstration only. Use dummy statements. "
-            "Customer-specific authentication is not implemented."
-        )
-
-        uploaded_file = st.file_uploader(
-            "Upload Bank Statement",
-            type=["pdf", "csv", "xlsx"],
-            key=f"upload_{conversation['id']}"
-        )
-
-        if uploaded_file is not None:
-
-            st.write(
-                f"Selected file: {uploaded_file.name}"
-            )
-
-            if st.button(
-                "Process Bank Statement",
-                key=f"process_{conversation['id']}"
-            ):
-
-                file_bytes = uploaded_file.getvalue()
-
-                if len(file_bytes) > MAX_FILE_SIZE:
-
-                    st.error(
-                        "File size must be less than 10 MB."
-                    )
-
+                if isinstance(result, dict):
+                    answer = result.get("answer", "No answer was returned.")
+                    sources = result.get("sources", [])
                 else:
+                    answer = str(result)
+                    sources = []
 
-                    try:
+                # 4. Save AI response
+                add_message(conversation_id, "assistant", answer)
 
-                        with st.spinner(
-                            "Processing bank statement..."
-                        ):
+                if sources:
+                    st.session_state[f"sources_{conversation_id}"] = sources
 
-                            extracted_text = process_statement(
-                                filename=uploaded_file.name,
-                                file_bytes=file_bytes
-                            )
-
-                        conversation["statement_text"] = extracted_text
-                        conversation["statement_name"] = uploaded_file.name
-                        conversation["messages"] = []
-
-                        st.success(
-                            "Bank statement processed successfully!"
-                        )
-
-                        st.rerun()
-
-                    except Exception as error:
-
-                        st.error(
-                            f"Statement processing failed: {error}"
-                        )
-
-        # ----------------------------------
-        # STATEMENT CONVERSATION
-        # ----------------------------------
-
-        if conversation["statement_text"]:
-
-            st.success(
-                f"Loaded: {conversation['statement_name']}"
-            )
-
-            with st.expander("Preview Statement Data"):
-
-                st.text(
-                    conversation["statement_text"][:3000]
-                )
-
-            st.divider()
-
-            st.subheader("Ask About Your Transactions")
-
-            display_messages(
-                conversation["messages"]
-            )
-
-            statement_question = st.chat_input(
-                "Ask about your bank transactions...",
-                key=f"statement_input_{conversation['id']}"
-            )
-
-            if statement_question:
-
-                save_user_message(
-                    conversation,
-                    statement_question
-                )
-
-                previous_history = get_previous_history(
-                    conversation
-                )
-
-                try:
-
-                    with st.spinner(
-                        "Analyzing your bank statement..."
-                    ):
-
-                        result = get_statement_answer(
-                            question=statement_question,
-                            statement_text=conversation["statement_text"],
-                            chat_history=previous_history
-                        )
-
-                    if isinstance(result, dict):
-
-                        answer = result.get(
-                            "answer",
-                            "No answer generated."
-                        )
-
-                        sources = result.get(
-                            "sources",
-                            []
-                        )
-
-                    else:
-
-                        answer = str(result)
-                        sources = []
-
-                    conversation["messages"].append({
-                        "role": "assistant",
-                        "content": answer,
-                        "sources": sources
-                    })
-
-                except Exception as error:
-
-                    conversation["messages"].append({
-                        "role": "assistant",
-                        "content": f"Statement RAG error: {error}"
-                    })
-
+                # 5. Refresh chat
                 st.rerun()
 
-        else:
-
-            st.info(
-                "Upload and process a statement to start chatting."
-            )
+            except Exception as error:
+                st.error(f"Statement AI error: {error}")
 
 
 # ==========================================
-# 8. ADMIN PORTAL
+# 9. RENDER SELECTED PORTAL
 # ==========================================
 
-elif role == "Admin Portal":
-
-    conversation = render_history_controls(
-        "admin"
-    )
-
-    st.header("🛡️ Admin AI Assistant")
-
-    st.write(
-        "Ask questions about fraud policies, "
-        "SLA guidelines and internal operations."
-    )
-
-    admin_token = st.sidebar.text_input(
-        "Admin API Token",
-        type="password"
-    )
-
-    display_messages(
-        conversation["messages"]
-    )
-
-    admin_question = st.chat_input(
-        "Ask an Admin question...",
-        key=f"admin_input_{conversation['id']}"
-    )
-
-    if admin_question:
-
-        if not admin_token:
-
-            st.warning(
-                "Enter your Admin API token in the sidebar."
-            )
-
-        else:
-
-            save_user_message(
-                conversation,
-                admin_question
-            )
-
-            previous_history = get_previous_history(
-                conversation
-            )
-
-            try:
-
-                with st.spinner(
-                    "Admin AI is thinking..."
-                ):
-
-                    response = requests.post(
-                        f"{API_BASE_URL}/admin/chat",
-                        json={
-                            "question": admin_question,
-                            "chat_history": previous_history
-                        },
-                        headers={
-                            "Authorization": f"Bearer {admin_token}"
-                        },
-                        timeout=90
-                    )
-
-                    response.raise_for_status()
-
-                    result = response.json()
-
-                conversation["messages"].append({
-                    "role": "assistant",
-                    "content": result.get(
-                        "answer",
-                        "No answer returned."
-                    ),
-                    "sources": result.get("sources", [])
-                })
-
-            except requests.exceptions.RequestException as error:
-
-                conversation["messages"].append({
-                    "role": "assistant",
-                    "content": f"Admin chatbot error: {error}"
-                })
-
-            st.rerun()
-
+if section in ["admin", "customer"]:
+    render_api_chat(section)
+elif section == "statement":
+    render_statement_chat()
 
 # ==========================================
-# 9. FOOTER
+# 10. FOOTER
 # ==========================================
 
 st.divider()
-
-st.caption(
-    "© 2026 VivPay | AI Financial Operations "
-    "& Customer Service Platform"
-)
+st.caption("VivPay | AI Financial Operations & Customer Service Platform")
